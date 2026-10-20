@@ -12,50 +12,106 @@
 <input name="key"><input name="action"><input name="lat"><input name="lng"><input name="accuracy">
 </form>
 <script>
-let watchId=null,lastSent=0,lastPosition=null,heartbeat=null;
-const $=id=>document.getElementById(id), form=$('sender');
-function msg(s){$('message').textContent=s;}
-function send(action,pos){
- const url=$('endpoint').value.trim(),key=$('key').value.trim();
- if(!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec(?:\?.*)?$/.test(url))throw Error('請填入正確的 /exec 網址');
- if(!key)throw Error('請輸入領隊密鑰');
- form.action=url;
- form.elements.namedItem('key').value=key;
- form.elements.namedItem('action').value=action;
- form.elements.namedItem('lat').value=pos?String(pos.coords.latitude):'';
- form.elements.namedItem('lng').value=pos?String(pos.coords.longitude):'';
- form.elements.namedItem('accuracy').value=pos?String(pos.coords.accuracy):'';
- form.submit();
+const $ = id => document.getElementById(id);
+const form = $('sender');
+let running = false;
+let timer = null;
+let inProgress = false;
+let generation = 0;
+const POLL_MS = 25000;
+const MAX_FIX_AGE_MS = 60000;
+function msg(text) { $('message').textContent = text; }
+function send(action, pos) {
+  const url = $('endpoint').value.trim();
+  const key = $('key').value.trim();
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec(?:\?.*)?$/.test(url)) {
+    throw new Error('請填入正確的 Apps Script /exec 網址');
+  }
+  if (!key) throw new Error('請輸入領隊密鑰');
+  form.action = url;
+  form.elements.namedItem('key').value = key;
+  form.elements.namedItem('action').value = action;
+  form.elements.namedItem('lat').value = pos ? String(pos.coords.latitude) : '';
+  form.elements.namedItem('lng').value = pos ? String(pos.coords.longitude) : '';
+  form.elements.namedItem('accuracy').value = pos ? String(pos.coords.accuracy) : '';
+  // 跨網域隱藏表單無法可靠讀取 Apps Script 回應；送出不等於寫入成功。
+  form.submit();
 }
-$('start').onclick=()=>{
- try{
-  if(!navigator.geolocation)throw Error('這個瀏覽器不支援 GPS 定位');
-  if(!window.isSecureContext)throw Error('請透過 HTTPS 開啟頁面');
-  if(!$('endpoint').value.trim()||!$('key').value.trim())throw Error('請先輸入網址及密鑰');
-  $('start').disabled=true;$('stop').disabled=false;msg('正在取得 GPS 位置，請允許定位…');
-  heartbeat=setInterval(()=>{
-    if(!lastPosition || watchId===null || Date.now()-lastSent<10000)return;
-    // 長時間停在同一地點也要回報，但不傳送超過 60 秒的舊 GPS 資料。
-    if(Date.now()-lastPosition.timestamp>60000){msg('GPS 資料超過 60 秒未更新，請檢查定位權限');return;}
-    try{send('update',lastPosition);lastSent=Date.now();msg('保持連線：'+new Date().toLocaleTimeString('zh-TW')+'（請至觀眾頁確認）');}
-    catch(err){msg(err.message);}
-  },12000);
-  watchId=navigator.geolocation.watchPosition(pos=>{
-    lastPosition=pos;
-    const now=Date.now();
-    if(now-lastSent<10000)return;
-    lastSent=now;
-    try{send('update',pos);msg('最近一次上傳請求：'+new Date().toLocaleTimeString('zh-TW')+'；GPS 精度約 '+Math.round(pos.coords.accuracy)+' 公尺（未確認伺服器是否寫入）');}
-    catch(err){msg('上傳失敗：'+err.message);}
-  },err=>{msg('GPS 錯誤：'+err.message+'；請確認定位權限及螢幕保持開啟');},
-  {enableHighAccuracy:true,maximumAge:0,timeout:20000});
- }catch(err){msg(err.message);$('start').disabled=false;$('stop').disabled=true;}
+function locateAndUpload(id) {
+  if (!running || inProgress || id !== generation) return;
+  inProgress = true;
+  msg('正在取得新的 GPS 定位…');
+  navigator.geolocation.getCurrentPosition(pos => {
+    inProgress = false;
+    if (!running || id !== generation) return;
+    const ageMs = Date.now() - pos.timestamp;
+    if (!Number.isFinite(ageMs) || ageMs < -10000 || ageMs > MAX_FIX_AGE_MS) {
+      msg('GPS 回傳的定位時間過舊或異常，未上傳；將於下一次自動重試');
+      return;
+    }
+    try {
+      send('update', pos);
+      msg('已送出位置更新請求：' + new Date().toLocaleTimeString('zh-TW') +
+          '；定位資料約 ' + Math.round(ageMs / 1000) + ' 秒前；精度約 ' +
+          Math.round(pos.coords.accuracy) + ' 公尺（請至 Sheets 確認寫入）');
+    } catch (err) {
+      msg('送出失敗：' + err.message);
+    }
+  }, err => {
+    inProgress = false;
+    if (!running || id !== generation) return;
+    msg('定位失敗（' + err.code + '）：' + err.message + '；25 秒後重試。請保持螢幕亮起。');
+  }, {
+    enableHighAccuracy: true,
+    maximumAge: 0,
+    timeout: 18000
+  });
+}
+$('start').onclick = () => {
+  try {
+    if (!navigator.geolocation) throw new Error('瀏覽器不支援定位');
+    if (!window.isSecureContext) throw new Error('請使用 HTTPS 網址');
+    if (!$('endpoint').value.trim() || !$('key').value.trim()) throw new Error('請輸入網址和密鑰');
+    if (running) return;
+    running = true;
+    inProgress = false;
+    const id = ++generation;
+    $('start').disabled = true;
+    $('stop').disabled = false;
+    $('endpoint').disabled = true;
+    $('key').disabled = true;
+    locateAndUpload(id);
+    timer = setInterval(() => locateAndUpload(id), POLL_MS);
+  } catch (err) {
+    msg(err.message);
+  }
 };
-$('stop').onclick=()=>{
- if(heartbeat!==null){clearInterval(heartbeat);heartbeat=null;}
- if(watchId!==null)navigator.geolocation.clearWatch(watchId);
- watchId=null;try{send('stop',null);msg('已送出停止分享請求（請至觀眾頁確認）');}catch(err){msg(err.message);}
- $('start').disabled=false;$('stop').disabled=true;
+$('stop').onclick = () => {
+  if (!running) return;
+  running = false;
+  ++generation;
+  inProgress = false;
+  if (timer !== null) clearInterval(timer);
+  timer = null;
+  try {
+    send('stop', null);
+    msg('已送出停止分享請求；請至 Google Sheets 確認 E2 變成 FALSE');
+  } catch (err) {
+    msg('停止請求送出失敗：' + err.message);
+  }
+  $('start').disabled = false;
+  $('stop').disabled = true;
+  $('endpoint').disabled = false;
+  $('key').disabled = false;
 };
-window.addEventListener('pagehide',()=>{if(heartbeat!==null)clearInterval(heartbeat);if(watchId!==null)navigator.geolocation.clearWatch(watchId);});
+// 在背景或鎖屏時，瀏覽器可暫停計時器；回前景立即補查一次。
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && running) locateAndUpload(generation);
+});
+window.addEventListener('pagehide', () => {
+  if (timer !== null) clearInterval(timer);
+  timer = null;
+  running = false;
+  ++generation;
+});
 </script></body></html>
