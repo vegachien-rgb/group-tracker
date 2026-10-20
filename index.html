@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>領隊位置分享</title>
+<style>body{font:16px system-ui,'Noto Sans TC',sans-serif;max-width:520px;margin:30px auto;padding:15px;color:#183047}label{display:block;margin:15px 0}input{box-sizing:border-box;width:100%;padding:12px;border:1px solid #adb9c5;border-radius:8px;margin-top:5px}button{padding:13px 16px;border:0;background:#126b8f;color:white;border-radius:8px;margin:8px 8px 8px 0}button:disabled{opacity:.5}#stop{background:#a53737}#message{padding:16px;background:#eef4f7;border-radius:8px;line-height:1.6}small{color:#526574}</style></head><body>
+<h2>📍 領隊位置分享</h2><p>僅領隊使用。開始後請保持本頁開啟且螢幕亮起。</p>
+<label>Apps Script Web App 網址<input id="endpoint" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off"></label>
+<label>領隊專用密鑰<input id="key" type="password" placeholder="從 Apps Script 執行紀錄取得" autocomplete="off"></label>
+<button id="start">開始分享</button><button id="stop" disabled>停止分享</button>
+<div id="message" role="status">尚未開始</div>
+<p><small>為保護隱私，密鑰不會儲存在 GitHub 程式碼或本機永久儲存區。定位上傳採隱藏表單，網頁只能確認已送出，不能可靠確認伺服器已寫入；請使用觀眾頁或 Google Sheets 驗證。</small></p>
+<iframe name="uploadTarget" style="display:none" title="位置上傳"></iframe>
+<form id="sender" method="POST" target="uploadTarget" style="display:none">
+<input name="key"><input name="action"><input name="lat"><input name="lng"><input name="accuracy">
+</form>
+<script>
+let watchId=null,lastSent=0,lastPosition=null,heartbeat=null;
+const $=id=>document.getElementById(id), form=$('sender');
+function msg(s){$('message').textContent=s;}
+function send(action,pos){
+ const url=$('endpoint').value.trim(),key=$('key').value.trim();
+ if(!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec(?:\?.*)?$/.test(url))throw Error('請填入正確的 /exec 網址');
+ if(!key)throw Error('請輸入領隊密鑰');
+ form.action=url;
+ form.elements.namedItem('key').value=key;
+ form.elements.namedItem('action').value=action;
+ form.elements.namedItem('lat').value=pos?String(pos.coords.latitude):'';
+ form.elements.namedItem('lng').value=pos?String(pos.coords.longitude):'';
+ form.elements.namedItem('accuracy').value=pos?String(pos.coords.accuracy):'';
+ form.submit();
+}
+$('start').onclick=()=>{
+ try{
+  if(!navigator.geolocation)throw Error('這個瀏覽器不支援 GPS 定位');
+  if(!window.isSecureContext)throw Error('請透過 HTTPS 開啟頁面');
+  if(!$('endpoint').value.trim()||!$('key').value.trim())throw Error('請先輸入網址及密鑰');
+  $('start').disabled=true;$('stop').disabled=false;msg('正在取得 GPS 位置，請允許定位…');
+  heartbeat=setInterval(()=>{
+    if(!lastPosition || watchId===null || Date.now()-lastSent<10000)return;
+    // 長時間停在同一地點也要回報，但不傳送超過 60 秒的舊 GPS 資料。
+    if(Date.now()-lastPosition.timestamp>60000){msg('GPS 資料超過 60 秒未更新，請檢查定位權限');return;}
+    try{send('update',lastPosition);lastSent=Date.now();msg('保持連線：'+new Date().toLocaleTimeString('zh-TW')+'（請至觀眾頁確認）');}
+    catch(err){msg(err.message);}
+  },12000);
+  watchId=navigator.geolocation.watchPosition(pos=>{
+    lastPosition=pos;
+    const now=Date.now();
+    if(now-lastSent<10000)return;
+    lastSent=now;
+    try{send('update',pos);msg('最近一次上傳請求：'+new Date().toLocaleTimeString('zh-TW')+'；GPS 精度約 '+Math.round(pos.coords.accuracy)+' 公尺（未確認伺服器是否寫入）');}
+    catch(err){msg('上傳失敗：'+err.message);}
+  },err=>{msg('GPS 錯誤：'+err.message+'；請確認定位權限及螢幕保持開啟');},
+  {enableHighAccuracy:true,maximumAge:0,timeout:20000});
+ }catch(err){msg(err.message);$('start').disabled=false;$('stop').disabled=true;}
+};
+$('stop').onclick=()=>{
+ if(heartbeat!==null){clearInterval(heartbeat);heartbeat=null;}
+ if(watchId!==null)navigator.geolocation.clearWatch(watchId);
+ watchId=null;try{send('stop',null);msg('已送出停止分享請求（請至觀眾頁確認）');}catch(err){msg(err.message);}
+ $('start').disabled=false;$('stop').disabled=true;
+};
+window.addEventListener('pagehide',()=>{if(heartbeat!==null)clearInterval(heartbeat);if(watchId!==null)navigator.geolocation.clearWatch(watchId);});
+</script></body></html>
